@@ -694,7 +694,8 @@ async function handleRunConfirmed() {
         secretsText,
         derivationIndex,
         feeSenderSecret,
-        mainAddress
+        mainAddress,
+        cachedWallets: state.scannedWallets
       })
     });
 
@@ -717,6 +718,10 @@ async function handleRunConfirmed() {
 
       for (const line of lines) {
         const trimmed = line.trim();
+        if (trimmed.startsWith(':')) {
+          // SSE heartbeat ping, ignore safely
+          continue;
+        }
         if (trimmed.startsWith('data: ')) {
           try {
             const eventData = JSON.parse(trimmed.slice(6));
@@ -896,8 +901,24 @@ function initEventListeners() {
   });
 }
 
+// Load default RPC from server config (.env)
+async function loadServerConfig() {
+  try {
+    const res = await fetch('/api/config');
+    const data = await res.json();
+    if (data && data.defaultRpcUrl) {
+      if (!el.rpcUrl.value || el.rpcUrl.value.includes('api.mainnet-beta.solana.com')) {
+        el.rpcUrl.value = data.defaultRpcUrl;
+      }
+    }
+  } catch (err) {
+    console.warn('Could not load server config:', err);
+  }
+}
+
 // Initialization
 document.addEventListener('DOMContentLoaded', () => {
   initEventListeners();
   loadSavedFeeSender();
+  loadServerConfig();
 });

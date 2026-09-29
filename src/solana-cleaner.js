@@ -42,7 +42,9 @@ export function normalizeRpcUrl(rawUrl) {
   const defaultRpc = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
   if (!rawUrl || typeof rawUrl !== 'string') return defaultRpc;
   let trimmed = rawUrl.trim();
-  if (!trimmed) return defaultRpc;
+  if (!trimmed || trimmed === 'https://api.mainnet-beta.solana.com') {
+    return defaultRpc;
+  }
 
   // If user pasted just an Alchemy API key
   if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
@@ -370,12 +372,12 @@ export function evaluateWalletDecision(walletInfo, feeSenderAddress, mainAddress
  * Prevents "block height exceeded" errors under Solana network congestion.
  */
 export async function sendAndConfirmTransactionRobust(connection, transaction, signers, options = {}) {
-  const maxRetries = options.maxRetries ?? 2;
+  const maxRetries = options.maxRetries ?? 1;
   let lastErr = null;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+      const { blockhash } = await connection.getLatestBlockhash('confirmed');
       transaction.recentBlockhash = blockhash;
       transaction.feePayer = signers[0].publicKey;
 
@@ -388,19 +390,15 @@ export async function sendAndConfirmTransactionRobust(connection, transaction, s
       const signature = await connection.sendRawTransaction(rawTx, {
         skipPreflight: false,
         preflightCommitment: 'confirmed',
-        maxRetries: 0
+        maxRetries: 3
       });
 
       // Poll confirmation with periodic background rebroadcasts
       const startTime = Date.now();
-      const timeoutMs = options.timeoutMs || 45000;
+      const timeoutMs = options.timeoutMs || 25000;
 
       while (Date.now() - startTime < timeoutMs) {
-        const [statusRes, currentHeight] = await Promise.all([
-          connection.getSignatureStatus(signature, { searchTransactionHistory: true }),
-          connection.getBlockHeight('confirmed').catch(() => 0)
-        ]);
-
+        const statusRes = await connection.getSignatureStatus(signature, { searchTransactionHistory: true });
         const status = statusRes?.value;
         if (status?.confirmationStatus === 'confirmed' || status?.confirmationStatus === 'finalized') {
           if (status.err) {
@@ -409,12 +407,7 @@ export async function sendAndConfirmTransactionRobust(connection, transaction, s
           return signature;
         }
 
-        // Check if blockhash has expired
-        if (currentHeight && currentHeight > lastValidBlockHeight) {
-          throw new Error(`Transaction signature ${signature} has expired: block height exceeded`);
-        }
-
-        await sleep(1500);
+        await sleep(800);
 
         // Continuous rebroadcast so validator leaders don't drop the packet
         try {
@@ -427,14 +420,16 @@ export async function sendAndConfirmTransactionRobust(connection, transaction, s
       lastErr = err;
       const isFatalError =
         err.message?.includes('InvalidAccountForFee') ||
-        err.message?.includes('custom program error');
+        err.message?.includes('custom program error') ||
+        err.message?.includes('already in use') ||
+        err.message?.includes('AccountNotFound');
 
       if (isFatalError) {
         throw err;
       }
 
       if (attempt < maxRetries) {
-        await sleep(1200);
+        await sleep(1000);
       }
     }
   }

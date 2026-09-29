@@ -1,3 +1,7 @@
+try {
+  process.loadEnvFile();
+} catch {}
+
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -40,6 +44,16 @@ app.use(express.json({ limit: '2mb' }));
 
 // Serve static frontend from /public
 app.use(express.static(path.join(__dirname, 'public')));
+
+/**
+ * GET /api/config
+ * Returns configured environment defaults (e.g. SOLANA_RPC_URL)
+ */
+app.get('/api/config', (req, res) => {
+  res.json({
+    defaultRpcUrl: process.env.SOLANA_RPC_URL || ''
+  });
+});
 
 /**
  * Validate a Solana public address
@@ -366,7 +380,7 @@ app.post('/api/preview', async (req, res) => {
  * Uses HTTP stream (ndjson format) to deliver real-time progress logs to the frontend terminal.
  */
 app.post('/api/run', async (req, res) => {
-  const { rpcUrl, secretsText, derivationIndex, feeSenderSecret, mainAddress } = req.body;
+  const { rpcUrl, secretsText, derivationIndex, feeSenderSecret, mainAddress, cachedWallets } = req.body;
 
   if (!mainAddress || !isValidPublicKey(mainAddress)) {
     return res.status(400).json({ error: 'A valid Main destination address is required.' });
@@ -374,12 +388,26 @@ app.post('/api/run', async (req, res) => {
 
   // Set up streaming response
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
 
+  // Send SSE keep-alive ping every 3 seconds so the connection NEVER drops or times out
+  const keepAlive = setInterval(() => {
+    try {
+      res.write(': ping\n\n');
+    } catch {}
+  }, 3000);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+  });
+
   const emit = (type, payload) => {
-    res.write(`data: ${JSON.stringify({ type, timestamp: new Date().toISOString(), ...payload })}\n\n`);
+    try {
+      res.write(`data: ${JSON.stringify({ type, timestamp: new Date().toISOString(), ...payload })}\n\n`);
+    } catch {}
   };
 
   try {
@@ -413,6 +441,16 @@ app.post('/api/run', async (req, res) => {
 
     const connection = createConnection(rpcUrl);
 
+    // Build cached lookup map if available
+    const cachedMap = new Map();
+    if (cachedWallets && Array.isArray(cachedWallets)) {
+      for (const w of cachedWallets) {
+        if (w && w.publicKey) {
+          cachedMap.set(w.publicKey, w);
+        }
+      }
+    }
+
     // Process wallets sequentially
     for (let i = 0; i < validWallets.length; i++) {
       const item = validWallets[i];
@@ -423,27 +461,41 @@ app.post('/api/run', async (req, res) => {
       emit('wallet_start', { publicKey: targetPubkey, index: i + 1, total: validWallets.length });
 
       try {
-        // STEP A - DECIDE
-        emit('log', { message: `[${i + 1}/${validWallets.length}] Scanning ${shortAddr}...` });
-        let walletInfo = await scanWalletAccounts(connection, targetPubkey);
+        const cached = cachedMap.get(targetPubkey);
 
-        // Preflight verify that candidate accounts can actually be closed before spending kickstart!
-        if (walletInfo.emptyAccountsCount > 0) {
-          const verifiedEmpty = await verifyCloseableAccounts(
-            connection,
-            targetPubkey,
-            walletInfo.emptyAccounts,
-            feeSenderPubkeyStr
-          );
-          if (verifiedEmpty.length < walletInfo.emptyAccountsCount) {
-            emit('log', {
-              message: `${shortAddr}: ${walletInfo.emptyAccountsCount - verifiedEmpty.length} token account(s) have non-zero dust/tokens and cannot be closed.`
-            });
-          }
-          walletInfo.emptyAccounts = verifiedEmpty;
-          walletInfo.emptyAccountsCount = verifiedEmpty.length;
-          walletInfo.lockedRentLamports = verifiedEmpty.reduce((acc, a) => acc + a.rentLamports, 0);
-          walletInfo.lockedRentSol = walletInfo.lockedRentLamports / LAMPORTS_PER_SOL;
+        // Fast-path: already processed or skipped
+        if (cached && (cached.status === 'skip' || cached.status === 'needs fee sender')) {
+          emit('log', { message: `[${i + 1}/${validWallets.length}] ${shortAddr} skipped: ${cached.reason || 'Not eligible'}` });
+          emit('wallet_update', {
+            publicKey: targetPubkey,
+            status: cached.status,
+            reason: cached.reason,
+            emptyAccountsCount: cached.emptyAccountsCount || 0,
+            nativeSol: cached.nativeSol || 0,
+            lockedRentSol: cached.lockedRentSol || 0
+          });
+          continue;
+        }
+
+        if (cached && (cached.status === 'claimed' || cached.status === 'sent')) {
+          emit('log', { message: `[${i + 1}/${validWallets.length}] ${shortAddr} already processed (${cached.status}), skipping.` });
+          emit('wallet_update', {
+            publicKey: targetPubkey,
+            status: cached.status,
+            reason: cached.reason
+          });
+          continue;
+        }
+
+        let walletInfo;
+        if (cached && cached.emptyAccounts) {
+          walletInfo = {
+            ...cached,
+            publicKey: targetPubkey
+          };
+        } else {
+          emit('log', { message: `[${i + 1}/${validWallets.length}] Scanning ${shortAddr}...` });
+          walletInfo = await scanWalletAccounts(connection, targetPubkey);
         }
 
         const decision = evaluateWalletDecision(walletInfo, feeSenderPubkeyStr, mainAddress);
@@ -523,6 +575,8 @@ app.post('/api/run', async (req, res) => {
     emit('error', { message: err.message });
     emit('done', {});
     return res.end();
+  } finally {
+    clearInterval(keepAlive);
   }
 });
 
