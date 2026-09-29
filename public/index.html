@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wallet cleaner</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◎</text></svg>">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="logo-row">
+        <h1 class="app-title">Wallet cleaner</h1>
+        <div class="badge-local">
+          <span class="badge-dot"></span>
+          <span>127.0.0.1</span>
+        </div>
+      </div>
+      <p class="app-subtitle">Scan empty accounts. Reclaim rent. Send the rest.</p>
+      <div class="header-divider"></div>
+    </header>
+
+    <!-- Main Content Form -->
+    <main>
+      <!-- Section 1 — Setup -->
+      <section class="form-section" id="section-setup">
+        <h2 class="section-title">Setup</h2>
+
+        <div class="form-group">
+          <label class="form-label" for="rpcUrl">RPC URL</label>
+          <input
+            type="url"
+            id="rpcUrl"
+            class="pill-input mono-input"
+            value=""
+            placeholder="https://api.mainnet-beta.solana.com (or your Helius / QuickNode / Alchemy RPC)"
+            spellcheck="false"
+          >
+          <div class="form-hint">Enter custom RPC (Helius / QuickNode / Alchemy recommended for fastest scans) or leave blank for default.</div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="mainAddress">Main destination address</label>
+          <input
+            type="text"
+            id="mainAddress"
+            class="pill-input mono-input"
+            placeholder="Public base58 address where all claimed & swept SOL should end up"
+            spellcheck="false"
+          >
+          <div class="form-hint">All leftover SOL from target wallets will be swept directly to this single address.</div>
+        </div>
+
+        <!-- Fee Sender Card -->
+        <div class="card card-soft">
+          <div class="card-header-row">
+            <span class="card-title">Fee sender wallet</span>
+            <span class="card-meta">Optional if wallets have native SOL</span>
+          </div>
+          <p class="form-hint" style="margin-bottom: 12px;">
+            Used only when a wallet has 0 SOL and cannot start claim. After the tiny fee arrives, that wallet pays the rest from claimed rent and sends everything to main.
+          </p>
+
+          <div id="feeSenderInputGroup" class="form-group" style="margin-bottom: 12px;">
+            <input
+              type="password"
+              id="feeSenderSecret"
+              class="pill-input mono-input"
+              placeholder="Paste fee sender secret key, seed phrase, or JSON array"
+              autocomplete="off"
+              spellcheck="false"
+            >
+          </div>
+
+          <div id="feeSenderStatusBox" class="fee-sender-status-box hidden">
+            <div>
+              <div class="status-label">Active Fee Sender</div>
+              <div class="status-val" id="feeSenderDisplayAddress">None</div>
+            </div>
+            <div style="text-align: right;">
+              <div class="status-label">Balance</div>
+              <div class="status-val" id="feeSenderDisplayBalance">0.00 SOL</div>
+            </div>
+          </div>
+
+          <div class="card-actions">
+            <button type="button" id="btnSaveFeeSender" class="btn btn-secondary btn-sm">Save fee sender</button>
+            <button type="button" id="btnRemoveFeeSender" class="btn btn-secondary btn-sm hidden">Remove fee sender</button>
+            <button type="button" id="btnRefreshFeeSender" class="btn btn-secondary btn-sm hidden">Refresh balance</button>
+          </div>
+        </div>
+
+        <!-- Target Secrets -->
+        <div class="form-group">
+          <label class="form-label" for="targetSecrets">Target secrets</label>
+          <textarea
+            id="targetSecrets"
+            class="card-textarea"
+            rows="6"
+            placeholder="Paste target wallets secrets (one secret per line)&#10;Accepts: 12/24-word seed phrase, base58 private key, or JSON byte array [12,34,...]&#10;# Lines starting with # are comments"
+            spellcheck="false"
+          ></textarea>
+          <div class="form-hint">One secret per line. Blank lines and lines starting with # are automatically ignored. Keys never leave localhost.</div>
+        </div>
+
+        <div style="display: flex; gap: 24px; align-items: flex-start; margin-top: 10px; flex-wrap: wrap;">
+          <div class="form-group" style="max-width: 220px; margin-bottom: 0;">
+            <label class="form-label" for="derivationIndex">Derivation account index</label>
+            <input
+              type="number"
+              id="derivationIndex"
+              class="pill-input"
+              value="0"
+              min="0"
+              placeholder="0"
+            >
+            <div class="form-hint">Path: m/44'/501'/0'/0'</div>
+          </div>
+          <div style="margin-top: 24px;">
+            <label style="display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--charcoal); cursor: pointer;">
+              <input type="checkbox" id="checkToken2022" style="accent-color: var(--primary);">
+              <span>Include Token-2022 accounts</span>
+            </label>
+            <div class="form-hint">99% of empty accounts are standard SPL tokens. Keep off for fastest scans.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Section 2 — Actions -->
+      <section class="actions-section" id="section-actions">
+        <div class="actions-bar">
+          <button type="button" id="btnScan" class="btn btn-primary">1. Scan</button>
+          <button type="button" id="btnPreview" class="btn btn-secondary" disabled>2. Preview</button>
+          <button type="button" id="btnRun" class="btn btn-secondary" disabled>3. Run</button>
+
+          <div class="action-step-indicator" id="actionStatusText">Step: Ready to scan</div>
+        </div>
+        <div id="scanProgressBar" class="progress-bar-container hidden">
+          <div id="scanProgressFill" class="progress-bar-fill"></div>
+        </div>
+      </section>
+
+      <!-- Notification / Error Box -->
+      <div id="noticeBox" class="notice-box hidden"></div>
+
+      <!-- Section 3 — Totals -->
+      <section class="form-section hidden" id="section-totals">
+        <h2 class="section-title">Summary & Estimates</h2>
+        <div class="totals-grid">
+          <div class="stat-card">
+            <div class="stat-label">Wallets found</div>
+            <div class="stat-value" id="statWalletsFound">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Empty accounts</div>
+            <div class="stat-value" id="statEmptyAccounts">0</div>
+            <div class="stat-sub">Token & Token-2022</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Locked rent SOL</div>
+            <div class="stat-value" id="statLockedRent">0.000000 SOL</div>
+            <div class="stat-sub" id="statLockedRentUsd">~$0.00</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Native SOL available</div>
+            <div class="stat-value" id="statNativeSol">0.000000 SOL</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Wallets needing kickstart</div>
+            <div class="stat-value" id="statNeedingKickstart">0</div>
+            <div class="stat-sub">0 SOL balances</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Total kickstart out</div>
+            <div class="stat-value" id="statTotalKickstart">0.000000 SOL</div>
+            <div class="stat-sub">0.0008 SOL per wallet (reclaimed to main)</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Estimated claim fees</div>
+            <div class="stat-value" id="statClaimFees">0.000000 SOL</div>
+            <div class="stat-sub">Paid by target</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Estimated send fees</div>
+            <div class="stat-value" id="statSendFees">0.000000 SOL</div>
+            <div class="stat-sub">Paid by target</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Fee sender network fees</div>
+            <div class="stat-value" id="statFeeSenderNetwork">0.000000 SOL</div>
+            <div class="stat-sub">~0.000005 per kickstart</div>
+          </div>
+          <div class="stat-card highlight">
+            <div class="stat-label">Expected SOL at main</div>
+            <div class="stat-value" id="statExpectedAtMain">0.000000 SOL</div>
+            <div class="stat-sub" id="statExpectedAtMainUsd">~$0.00</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Section 3.5 — Categorized Keys by Eligibility -->
+      <section class="form-section hidden" id="section-key-categories">
+        <div class="categorized-keys-header">
+          <div>
+            <h2 class="section-title" style="margin-bottom: 4px;">Categorized Keys by Eligibility</h2>
+            <div style="font-size: 13px; color: var(--body);">
+              Separate wallets eligible for rent reclaim (min 0.0019 – 0.002 SOL) from ineligible wallets.
+            </div>
+          </div>
+          <div class="threshold-controller">
+            <label for="eligibilityThreshold" class="threshold-label">Rent Threshold:</label>
+            <div class="threshold-input-wrap">
+              <input type="number" id="eligibilityThreshold" class="pill-input threshold-input" value="0.0019" step="0.0001" min="0">
+              <span class="threshold-unit">SOL</span>
+            </div>
+            <div class="threshold-quick-buttons">
+              <button type="button" class="btn-threshold-quick active" data-val="0.0019">0.0019</button>
+              <button type="button" class="btn-threshold-quick" data-val="0.0020">0.0020</button>
+              <button type="button" class="btn-threshold-quick" data-val="0.000001">&gt; 0</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="keys-grid">
+          <!-- Card 1: Eligible Keys -->
+          <div class="keys-card eligible-card">
+            <div class="keys-card-header">
+              <div class="keys-header-title">
+                <span class="status-indicator status-green"></span>
+                <span class="keys-title-text">Eligible Keys</span>
+                <span class="keys-badge badge-eligible" id="badgeEligibleCount">0 Wallets</span>
+              </div>
+              <div class="keys-header-meta">
+                <span id="eligibleTotalRent" class="keys-meta-highlight">0.000000 SOL</span>
+              </div>
+            </div>
+            <div class="keys-actions-bar">
+              <button type="button" class="btn-action-small btn-copy-primary" id="btnCopyEligibleKeys" title="Copy all eligible keys to clipboard">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                Copy Keys
+              </button>
+              <button type="button" class="btn-action-small" id="btnCopyEligibleAddresses" title="Copy public addresses">
+                Copy Addresses
+              </button>
+              <button type="button" class="btn-action-small" id="btnDownloadEligibleKeys" title="Download as .txt file">
+                Download .txt
+              </button>
+              <button type="button" class="btn-action-small btn-view-table" id="btnFilterTableEligible" title="View eligible wallets in table below">
+                View in Table
+              </button>
+            </div>
+            <textarea id="eligibleKeysTextarea" class="keys-textarea" readonly rows="7" placeholder="No eligible keys found" spellcheck="false"></textarea>
+            <div class="keys-footer">
+              <span id="eligibleKeysFooterText">0 keys (holding &ge; 0.0019 SOL rent)</span>
+            </div>
+          </div>
+
+          <!-- Card 2: Ineligible Keys -->
+          <div class="keys-card ineligible-card">
+            <div class="keys-card-header">
+              <div class="keys-header-title">
+                <span class="status-indicator status-grey"></span>
+                <span class="keys-title-text">Ineligible / Zero Rent</span>
+                <span class="keys-badge badge-ineligible" id="badgeIneligibleCount">0 Wallets</span>
+              </div>
+              <div class="keys-header-meta">
+                <span id="ineligibleTotalRent" class="keys-meta-dim">No empty accounts</span>
+              </div>
+            </div>
+            <div class="keys-actions-bar">
+              <button type="button" class="btn-action-small btn-copy-primary" id="btnCopyIneligibleKeys" title="Copy all ineligible keys to clipboard">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                Copy Keys
+              </button>
+              <button type="button" class="btn-action-small" id="btnCopyIneligibleAddresses" title="Copy public addresses">
+                Copy Addresses
+              </button>
+              <button type="button" class="btn-action-small" id="btnDownloadIneligibleKeys" title="Download as .txt file">
+                Download .txt
+              </button>
+              <button type="button" class="btn-action-small btn-view-table" id="btnFilterTableIneligible" title="View ineligible wallets in table below">
+                View in Table
+              </button>
+            </div>
+            <textarea id="ineligibleKeysTextarea" class="keys-textarea" readonly rows="7" placeholder="No ineligible keys found" spellcheck="false"></textarea>
+            <div class="keys-footer">
+              <span id="ineligibleKeysFooterText">0 keys (&lt; 0.0019 SOL rent)</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Section 4 — Wallet Table -->
+      <section class="form-section hidden" id="section-table">
+        <div class="table-header-row">
+          <h2 class="section-title" style="margin-bottom: 0;">
+            <span>Target Wallets</span>
+            <span style="font-size: 13px; font-weight: 400; color: var(--body);" id="tableCountLabel"></span>
+          </h2>
+          <div class="table-filter-pills" id="tableFilterGroup">
+            <button type="button" class="filter-tab active" data-filter="all">All (<span id="filterAllCount">0</span>)</button>
+            <button type="button" class="filter-tab" data-filter="eligible">Eligible (<span id="filterEligibleCount">0</span>)</button>
+            <button type="button" class="filter-tab" data-filter="ineligible">Ineligible (<span id="filterIneligibleCount">0</span>)</button>
+          </div>
+        </div>
+        <div class="table-container">
+          <table class="wallet-table">
+            <thead>
+              <tr>
+                <th>Wallet Address</th>
+                <th>Eligibility</th>
+                <th>Empty Accounts</th>
+                <th>Locked SOL</th>
+                <th>Native SOL</th>
+                <th>Net to Main</th>
+                <th>Status</th>
+                <th>Key Action</th>
+              </tr>
+            </thead>
+            <tbody id="walletTableBody">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Section 5 — Activity Log -->
+      <section class="form-section" id="section-log">
+        <div class="terminal-card">
+          <div class="terminal-header">
+            <div class="terminal-traffic-lights">
+              <span class="traffic-dot traffic-red"></span>
+              <span class="traffic-dot traffic-yellow"></span>
+              <span class="traffic-dot traffic-green"></span>
+            </div>
+            <span class="terminal-title">activity.log</span>
+            <div class="terminal-controls">
+              <button type="button" class="terminal-btn" id="btnCopyLog">Copy log</button>
+              <button type="button" class="terminal-btn" id="btnClearLog">Clear</button>
+            </div>
+          </div>
+          <div class="terminal-body" id="terminalBody">
+            <div class="terminal-line muted"><span class="terminal-prompt">$</span>wallet cleaner initialized. Ready to scan.</div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <p>Local only · Keys never leave this machine · No service fee</p>
+    </footer>
+  </div>
+
+  <!-- Confirmation Modal -->
+  <div class="modal-overlay" id="confirmModal">
+    <div class="modal-card">
+      <h3 class="modal-title">Confirm Execution</h3>
+      <p class="modal-copy">
+        This will kickstart empty wallets if needed, claim empty-account rent, then send remaining SOL to the main address. Continue?
+      </p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" id="btnModalCancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="btnModalConfirm">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
